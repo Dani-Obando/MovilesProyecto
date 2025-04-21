@@ -1,27 +1,21 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const cors = require('cors');
-const conectarDB = require('./db');
-const Jugada = require('./models/Jugada');
-const Adivinanza = require('./models/Adivinanza');
-const jugadasRoute = require('./routes/jugadas');
-const adivinanzasRoute = require('./routes/adivinanzas');
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const cors = require("cors");
+const conectarDB = require("./db");
+const Jugada = require("./models/Jugada");
+const Adivinanza = require("./models/Adivinanza");
+const jugadasRoute = require("./routes/jugadas");
+const adivinanzasRoute = require("./routes/adivinanzas");
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Configurar CORS para aceptar solicitudes desde cualquier origen (ajustar según lo necesites)
-app.use(cors({
-    origin: '*', // Cambiar a un dominio específico si es necesario
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type']
-}));
-
+app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
 app.use(express.json());
-app.use('/jugadas', jugadasRoute);
-app.use('/adivinanzas', adivinanzasRoute);
+app.use("/jugadas", jugadasRoute);
+app.use("/adivinanzas", adivinanzasRoute);
 
 conectarDB();
 
@@ -35,32 +29,12 @@ let bloquesPorJugador = {};
 let turnoTimeout = null;
 
 const sesionesIndividuales = {};
+const wsIndividuales = {};
 const COLORES = ["red", "blue", "green", "orange", "purple"];
 
 wss.on("connection", (ws) => {
     ws.id = Math.random().toString(36).substring(2);
     ws.eliminado = false;
-
-    // Verificar si el jugador tiene una sesión existente
-    if (sesionesIndividuales[ws.id]) {
-        ws.session = sesionesIndividuales[ws.id];
-    } else {
-        // Crear una nueva sesión para el jugador
-        ws.session = {
-            bloques: [],
-            pesoIzquierdo: 0,
-            pesoDerecho: 0,
-            jugadas: [],
-            terminado: false
-        };
-        // Agregar bloques con pesos aleatorios
-        COLORES.forEach((color) => {
-            for (let i = 0; i < 2; i++) {
-                const peso = Math.floor(Math.random() * 19) + 2;
-                ws.session.bloques.push({ color, peso });
-            }
-        });
-    }
 
     ws.on("message", async (data) => {
         try {
@@ -71,8 +45,9 @@ wss.on("connection", (ws) => {
                 ws.modo = msg.modo || "multijugador";
 
                 if (ws.modo === "individual") {
-                    // Lógica para el modo individual
-                    if (!sesionesIndividuales[ws.nombre]) {
+                    ws.sesion = sesionesIndividuales[ws.nombre];
+
+                    if (!ws.sesion) {
                         const bloques = [];
                         COLORES.forEach((color) => {
                             for (let i = 0; i < 2; i++) {
@@ -80,39 +55,43 @@ wss.on("connection", (ws) => {
                                 bloques.push({ color, peso });
                             }
                         });
-                        sesionesIndividuales[ws.nombre] = {
+
+                        ws.sesion = {
                             pesoIzquierdo: 0,
                             pesoDerecho: 0,
                             bloques,
                             jugadas: [],
                             terminado: false,
                         };
+
+                        sesionesIndividuales[ws.nombre] = ws.sesion;
                     }
 
-                    ws.send(JSON.stringify({
-                        type: "TURNO",
-                        tuTurno: true,
-                        jugadorEnTurno: ws.nombre,
-                    }));
+                    // ✅ Vincular el nuevo WebSocket activo
+                    ws.sesion.socket = ws;
+                    wsIndividuales[ws.nombre] = ws;
+
+                    if (ws.sesion.terminado) {
+                        ws.send(JSON.stringify({
+                            type: "MENSAJE",
+                            contenido: "🎮 Tu partida individual ya ha terminado.",
+                        }));
+                    } else {
+                        ws.send(JSON.stringify({
+                            type: "TURNO",
+                            tuTurno: true,
+                            jugadorEnTurno: ws.nombre,
+                        }));
+                    }
+
                 } else {
-                    // Lógica para el modo multijugador
                     const yaExiste = jugadores.find((j) => j.nombre === msg.jugador);
                     if (yaExiste) {
                         ws.send(JSON.stringify({
                             type: "ERROR",
-                            mensaje: "Este nombre de jugador ya está en uso en esta partida.",
+                            mensaje: "Este nombre ya está en uso.",
                         }));
-                        ws.close();
-                        return;
-                    }
-
-                    if (jugadores.length >= 9) {
-                        ws.send(JSON.stringify({
-                            type: "ERROR",
-                            mensaje: "El número máximo de jugadores (10) ya ha sido alcanzado.",
-                        }));
-                        ws.close();
-                        return;
+                        return ws.close();
                     }
 
                     if (!bloquesPorJugador[msg.jugador]) {
@@ -143,44 +122,32 @@ wss.on("connection", (ws) => {
                 }
             }
 
+            if (msg.type === "SALIR") {
+                ws.cerrarSesion = true;
+                return ws.close();
+            }
+
             if (msg.type === "ADIVINANZA") {
-                try {
-                    const { jugador, bloques, aciertos } = msg;
-            
-                    if (!jugador || !Array.isArray(bloques) || typeof aciertos !== "number") {
-                        ws.send(JSON.stringify({
-                            type: "ERROR",
-                            mensaje: "Datos de adivinanza incompletos o inválidos.",
-                        }));
-                        return;
-                    }
-            
-                    const adivinanza = new Adivinanza({
-                        jugador,
-                        bloques,
-                        aciertos,
-                    });
-            
-                    await adivinanza.save();
-            
-                    ws.send(JSON.stringify({
-                        type: "ADIVINANZA_RESULTADO",
-                        resultado: "✅ Adivinanza registrada con éxito",
-                    }));
-                } catch (err) {
-                    console.error("❌ Error al guardar adivinanza:", err.message);
-                    ws.send(JSON.stringify({
+                const { jugador, bloques, aciertos } = msg;
+                if (!jugador || !Array.isArray(bloques) || typeof aciertos !== "number") {
+                    return ws.send(JSON.stringify({
                         type: "ERROR",
-                        mensaje: "Error al registrar adivinanza: " + err.message,
+                        mensaje: "Adivinanza inválida.",
                     }));
                 }
-            }
-            
 
-            // Lógica para la jugada de los jugadores
+                const adivinanza = new Adivinanza({ jugador, bloques, aciertos });
+                await adivinanza.save();
+
+                ws.send(JSON.stringify({
+                    type: "ADIVINANZA_RESULTADO",
+                    resultado: "✅ Adivinanza registrada",
+                }));
+            }
+
             if (msg.type === "JUGADA") {
                 if (ws.modo === "individual") {
-                    const sesion = sesionesIndividuales[ws.nombre];
+                    const sesion = ws.sesion || sesionesIndividuales[ws.nombre];
                     if (!sesion || sesion.terminado) return;
 
                     sesion.jugadas.push({ ...msg });
@@ -232,12 +199,8 @@ wss.on("connection", (ws) => {
                             jugadorEnTurno: ws.nombre,
                         }));
                     }
-
                 } else {
                     clearTimeout(turnoTimeout);
-                    const jugadorActual = jugadores[turnoActual];
-                    if (!jugadorActual) return;
-
                     const jugada = new Jugada({
                         jugador: msg.jugador,
                         turno: totalJugadas + 1,
@@ -278,32 +241,40 @@ wss.on("connection", (ws) => {
     });
 
     ws.on("close", () => {
-        console.log(`🔴 Jugador desconectado: ${ws.id}`);
-        jugadores = jugadores.filter((j) => j !== ws);
-        if (turnoActual >= jugadores.length) turnoActual = 0;
-        enviarTurno();
+        if (!ws.nombre) return;
+
+        if (ws.modo === "individual") {
+            console.log(`🔸 WebSocket de ${ws.nombre} en modo individual se cerró, pero la sesión continúa activa.`);
+            return;
+        }
+
+        if (ws.cerrarSesion) {
+            console.log(`🔴 Jugador desconectado manualmente: ${ws.nombre}`);
+            jugadores = jugadores.filter((j) => j !== ws);
+            if (turnoActual >= jugadores.length) turnoActual = 0;
+            enviarTurno();
+        } else {
+            console.log(`🕓 Jugador ${ws.nombre} se desconectó sin SALIR, eliminado del multijugador.`);
+            jugadores = jugadores.filter((j) => j !== ws);
+            if (turnoActual >= jugadores.length) turnoActual = 0;
+            enviarTurno();
+        }
     });
 });
 
 function avanzarTurno() {
     if (jugadores.length === 0) return;
-
     let intentos = 0;
     do {
         turnoActual = (turnoActual + 1) % jugadores.length;
         intentos++;
     } while (jugadores[turnoActual]?.eliminado && intentos < jugadores.length);
-
     enviarTurno();
 }
 
 function enviarTurno() {
     clearTimeout(turnoTimeout);
-
-    if (!jugadores.length || turnoActual >= jugadores.length) {
-        console.warn("⚠️ No hay jugadores activos para el turno.");
-        return;
-    }
+    if (!jugadores.length || turnoActual >= jugadores.length) return;
 
     const jugadorActual = jugadores[turnoActual];
     if (!jugadorActual) return;
@@ -312,42 +283,28 @@ function enviarTurno() {
 
     jugadores.forEach((j, i) => {
         if (j.readyState === WebSocket.OPEN) {
-            try {
-                j.send(JSON.stringify({
-                    type: "TURNO",
-                    tuTurno: i === turnoActual && !j.eliminado,
-                    jugadorEnTurno: nombreActual,
-                }));
-            } catch (err) {
-                console.error("❌ Error al enviar turno:", err.message);
-            }
+            j.send(JSON.stringify({
+                type: "TURNO",
+                tuTurno: i === turnoActual && !j.eliminado,
+                jugadorEnTurno: nombreActual,
+            }));
         }
     });
 
     turnoTimeout = setTimeout(() => {
         const jugadorTimeout = jugadores[turnoActual];
-        if (!jugadorTimeout) {
-            console.warn("⚠️ Jugador ya no existe en turnoActual:", turnoActual);
-            avanzarTurno();
-            return;
-        }
+        if (!jugadorTimeout || jugadorTimeout.eliminado) return;
 
-        if (!jugadorTimeout.eliminado) {
-            jugadorTimeout.eliminado = true;
-            try {
-                jugadorTimeout.send(JSON.stringify({
-                    type: "ELIMINADO",
-                    mensaje: "Has sido eliminado por inactividad (60s sin mover bloque).",
-                }));
-            } catch (err) {
-                console.error("❌ Error al notificar eliminación:", err.message);
-            }
+        jugadorTimeout.eliminado = true;
+        jugadorTimeout.send(JSON.stringify({
+            type: "ELIMINADO",
+            mensaje: "Has sido eliminado por inactividad (60s sin mover bloque).",
+        }));
 
-            broadcast({
-                type: "MENSAJE",
-                contenido: `${jugadorTimeout.nombre} fue eliminado por inactividad.`,
-            });
-        }
+        broadcast({
+            type: "MENSAJE",
+            contenido: `${jugadorTimeout.nombre} fue eliminado por inactividad.`,
+        });
 
         avanzarTurno();
     }, 60000);
@@ -357,11 +314,7 @@ function broadcast(data) {
     const mensaje = typeof data === "string" ? data : JSON.stringify(data);
     jugadores.forEach((j) => {
         if (j.readyState === WebSocket.OPEN) {
-            try {
-                j.send(mensaje);
-            } catch (err) {
-                console.error("❌ Error al enviar broadcast:", err.message);
-            }
+            j.send(mensaje);
         }
     });
 }
@@ -376,9 +329,7 @@ async function enviarResumenFinal() {
         color: j.color || null,
     }));
 
-    const sobrevivientes = jugadores
-        .filter((j) => !j.eliminado)
-        .map((j) => j.nombre || "Jugador");
+    const sobrevivientes = jugadores.filter((j) => !j.eliminado).map((j) => j.nombre);
 
     const ladoGanador =
         pesoIzquierdo === pesoDerecho

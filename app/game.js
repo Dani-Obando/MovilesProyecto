@@ -17,6 +17,7 @@ const COLORES = ["red", "blue", "green", "orange", "purple"];
 export default function GameScreen() {
   const { nombre, modo } = useLocalSearchParams();
   const router = useRouter();
+  const socket = getSocket();
 
   const [bloques, setBloques] = useState([]);
   const [pesoIzq, setPesoIzq] = useState(0);
@@ -30,10 +31,9 @@ export default function GameScreen() {
   const [contador, setContador] = useState(60);
   const [jugadoresConectados, setJugadoresConectados] = useState(1);
   const [esperando, setEsperando] = useState(modo === "multijugador");
-  const [equipo, setEquipo] = useState(null);
-  const [companeros, setCompaneros] = useState([]);
+  const [equipos, setEquipos] = useState([]);
+  const [tiempoRestante, setTiempoRestante] = useState(null);
 
-  const socket = useRef(getSocket());
   const [dropAreas, setDropAreas] = useState({ izquierdo: null, derecho: null });
   const intervaloRef = useRef(null);
 
@@ -55,27 +55,16 @@ export default function GameScreen() {
 
   useEffect(() => {
     const mensaje = { type: "ENTRADA", jugador: nombre, modo };
+    if (socket.readyState === 1) socket.send(JSON.stringify(mensaje));
+    else socket.onopen = () => socket.send(JSON.stringify(mensaje));
 
-    if (socket.current.readyState === 1) {
-      socket.current.send(JSON.stringify(mensaje));
-    } else {
-      socket.current.onopen = () => {
-        socket.current.send(JSON.stringify(mensaje));
-      };
-    }
-
-    socket.current.onmessage = (e) => {
+    socket.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
 
         if (data.type === "TURNO") {
           setMiTurno(data.tuTurno);
           setJugadorEnTurno(data.jugadorEnTurno);
-          if (modo === "multijugador") {
-            setEquipo(data.equipo || null);
-            setCompaneros(data.compañeros || []);
-          }
-
           if (data.tuTurno) {
             setContador(60);
             clearInterval(intervaloRef.current);
@@ -119,9 +108,14 @@ export default function GameScreen() {
 
         if (data.type === "ENTRADA" && data.totalJugadores !== undefined) {
           setJugadoresConectados(data.totalJugadores);
-          if (data.totalJugadores >= 3) {
-            setEsperando(false);
-          }
+        }
+
+        if (data.type === "TEMPORIZADOR") {
+          setTiempoRestante(data.tiempoRestante);
+        }
+
+        if (data.type === "EQUIPOS") {
+          setEquipos(data.lista);
         }
       } catch (err) {
         console.error("❌ WS Error:", err.message);
@@ -134,7 +128,7 @@ export default function GameScreen() {
   }, []);
 
   const enviarJugada = (bloque, lado) => {
-    socket.current.send(JSON.stringify({
+    socket.send(JSON.stringify({
       type: "JUGADA",
       jugador: nombre,
       peso: bloque.peso,
@@ -168,16 +162,13 @@ export default function GameScreen() {
 
     const panResponder = PanResponder.create({
       onStartShouldSetPanResponder: () => miTurno && !eliminado,
-      onPanResponderGrant: () => {
-        bloque.pan.extractOffset();
-      },
+      onPanResponderGrant: () => bloque.pan.extractOffset(),
       onPanResponderMove: Animated.event(
         [null, { dx: bloque.pan.x, dy: bloque.pan.y }],
         { useNativeDriver: false }
       ),
       onPanResponderRelease: (_, gesture) => {
         bloque.pan.flattenOffset();
-
         const inIzq = isInDropArea(gesture, dropAreas.izquierdo);
         const inDer = isInDropArea(gesture, dropAreas.derecho);
 
@@ -217,10 +208,23 @@ export default function GameScreen() {
   if (modo === "multijugador" && esperando) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.esperando}>
-          Esperando a {MAX_JUGADORES - jugadoresConectados} jugador
-          {(MAX_JUGADORES - jugadoresConectados) !== 1 ? "es" : ""} más...
+        <Text style={styles.titulo}>⏳ Esperando jugadores...</Text>
+        <Text style={styles.subtitulo}>
+          {jugadoresConectados < MAX_JUGADORES
+            ? `Faltan ${MAX_JUGADORES - jugadoresConectados} jugador(es)`
+            : "Jugadores completos"}
         </Text>
+
+        {tiempoRestante !== null && (
+          <Text style={styles.timer}>🕒 Iniciando en: {tiempoRestante}s</Text>
+        )}
+
+        <Text style={styles.subtitulo}>👥 Equipos actuales:</Text>
+        {equipos.map((equipo, i) => (
+          <Text key={i} style={styles.equipo}>
+            Equipo {i + 1}: {equipo.join(" y ")}
+          </Text>
+        ))}
       </View>
     );
   }
@@ -228,11 +232,6 @@ export default function GameScreen() {
   return (
     <View style={{ flex: 1, padding: 20 }}>
       <Text style={styles.titulo}>Jugador: {nombre}</Text>
-      {modo === "multijugador" && equipo && (
-        <Text style={styles.subtitulo}>
-          Equipo #{equipo} — Compañero: {companeros.join(", ") || "ninguno"}
-        </Text>
-      )}
       <Text style={styles.subtitulo}>Turno de: {jugadorEnTurno || "..."}</Text>
       <Text style={{ color: "red", marginBottom: 10 }}>
         {miTurno ? `⏱️ Tiempo: ${contador}s` : "⏳ Esperando turno..."}
@@ -263,6 +262,7 @@ export default function GameScreen() {
 const styles = StyleSheet.create({
   titulo: { fontSize: 18, marginBottom: 10 },
   subtitulo: { fontSize: 16, fontWeight: "bold", marginBottom: 10 },
+  timer: { fontSize: 20, color: "tomato", marginTop: 10 },
   bloque: {
     width: 60,
     height: 60,
@@ -275,5 +275,6 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   esperando: { fontSize: 18, textAlign: "center" },
-  centered: { flex: 1, justifyContent: "center", alignItems: "center" },
+  centered: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
+  equipo: { fontSize: 15, marginVertical: 3 },
 });

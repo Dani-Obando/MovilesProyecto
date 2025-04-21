@@ -20,32 +20,130 @@ app.use("/adivinanzas", adivinanzasRoute);
 conectarDB();
 
 let jugadores = [];
+let sesionesIndividuales = {};
+let equiposPorJugador = {};
 let turnoActual = 0;
-let pesoIzquierdo = 0;
-let pesoDerecho = 0;
 let totalJugadas = 0;
 let bloquesTotales = 0;
 let bloquesPorJugador = {};
-let turnoTimeout = null;
+let pesoIzquierdo = 0;
+let pesoDerecho = 0;
+let jugadoresListos = false;
 
-const sesionesIndividuales = {};
+let temporizadorInicio = null;
+let tiempoRestante = null;
+
 const COLORES = ["red", "blue", "green", "orange", "purple"];
-let equiposPorJugador = {};
+
+function broadcast(data) {
+  const mensaje = typeof data === "string" ? data : JSON.stringify(data);
+  jugadores.forEach((j) => {
+    if (j.readyState === WebSocket.OPEN) {
+      j.send(mensaje);
+    }
+  });
+}
 
 function emparejarJugadores() {
-  const nombres = jugadores.map((j) => j.nombre);
-  const barajados = nombres.sort(() => Math.random() - 0.5);
+  const nombres = jugadores.map(j => j.nombre);
+  const mezclados = nombres.sort(() => Math.random() - 0.5);
   equiposPorJugador = {};
 
-  for (let i = 0; i < barajados.length; i += 2) {
-    const equipoId = Math.floor(i / 2) + 1;
-    equiposPorJugador[barajados[i]] = equipoId;
-    if (barajados[i + 1]) {
-      equiposPorJugador[barajados[i + 1]] = equipoId;
-    }
+  for (let i = 0; i < mezclados.length; i += 2) {
+    const equipoNum = Math.floor(i / 2) + 1;
+    equiposPorJugador[mezclados[i]] = equipoNum;
+    if (mezclados[i + 1]) equiposPorJugador[mezclados[i + 1]] = equipoNum;
   }
 
-  console.log("🔀 Equipos generados:", equiposPorJugador);
+  const equipos = Object.entries(equiposPorJugador).reduce((acc, [nombre, equipo]) => {
+    if (!acc[equipo]) acc[equipo] = [];
+    acc[equipo].push(nombre);
+    return acc;
+  }, {});
+
+  broadcast({ type: "EQUIPOS", lista: Object.values(equipos) });
+}
+
+function detenerTemporizador() {
+  if (temporizadorInicio) {
+    clearInterval(temporizadorInicio);
+    temporizadorInicio = null;
+    tiempoRestante = null;
+    broadcast({ type: "TEMPORIZADOR", tiempoRestante: null });
+  }
+}
+
+function iniciarTemporizadorInicio() {
+  if (temporizadorInicio || jugadoresListos) return;
+
+  tiempoRestante = jugadores.length === 10 ? 5 : 20;
+
+  temporizadorInicio = setInterval(() => {
+    if (jugadores.length % 2 !== 0) {
+      detenerTemporizador();
+      return;
+    }
+
+    tiempoRestante--;
+
+    broadcast({ type: "TEMPORIZADOR", tiempoRestante });
+
+    if (tiempoRestante <= 0) {
+      clearInterval(temporizadorInicio);
+      temporizadorInicio = null;
+      jugadoresListos = true;
+
+      emparejarJugadores();
+      enviarTurno();
+    }
+  }, 1000);
+}
+
+function enviarTurno() {
+  if (!jugadoresListos || jugadores.length === 0) return;
+
+  const jugadorActual = jugadores[turnoActual];
+  if (!jugadorActual) return;
+
+  const nombreActual = jugadorActual.nombre;
+  jugadores.forEach((j, i) => {
+    const eq = equiposPorJugador[j.nombre];
+    const compañeros = Object.entries(equiposPorJugador)
+      .filter(([n, e]) => e === eq && n !== j.nombre)
+      .map(([n]) => n);
+
+    if (j.readyState === WebSocket.OPEN) {
+      j.send(JSON.stringify({
+        type: "TURNO",
+        tuTurno: i === turnoActual && !j.eliminado,
+        jugadorEnTurno: nombreActual,
+        equipo: eq,
+        compañeros,
+      }));
+    }
+  });
+}
+
+function avanzarTurno() {
+  if (jugadores.length === 0) return;
+  let intentos = 0;
+
+  do {
+    turnoActual = (turnoActual + 1) % jugadores.length;
+    intentos++;
+  } while (jugadores[turnoActual]?.eliminado && intentos < jugadores.length);
+
+  enviarTurno();
+}
+
+function actualizarEquiposYTemporizador() {
+  if (jugadores.length >= 2 && jugadores.length % 2 === 0) {
+    emparejarJugadores();
+    iniciarTemporizadorInicio();
+  } else {
+    detenerTemporizador();
+    emparejarJugadores();
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -65,8 +163,7 @@ wss.on("connection", (ws) => {
             const bloques = [];
             COLORES.forEach((color) => {
               for (let i = 0; i < 2; i++) {
-                const peso = Math.floor(Math.random() * 19) + 2;
-                bloques.push({ color, peso });
+                bloques.push({ color, peso: Math.floor(Math.random() * 19) + 2 });
               }
             });
             sesionesIndividuales[ws.nombre] = {
@@ -84,31 +181,19 @@ wss.on("connection", (ws) => {
             jugadorEnTurno: ws.nombre,
           }));
         } else {
-          const yaExiste = jugadores.find((j) => j.nombre === msg.jugador);
-          if (yaExiste) {
+          if (jugadores.some(j => j.nombre === msg.jugador)) {
             ws.send(JSON.stringify({
               type: "ERROR",
-              mensaje: "Este nombre de jugador ya está en uso en esta partida.",
+              mensaje: "Este nombre de jugador ya está en uso.",
             }));
-            ws.close();
-            return;
-          }
-
-          if (jugadores.length >= 10) {
-            ws.send(JSON.stringify({
-              type: "ERROR",
-              mensaje: "El número máximo de jugadores (10) ya ha sido alcanzado.",
-            }));
-            ws.close();
             return;
           }
 
           if (!bloquesPorJugador[msg.jugador]) {
             const bloques = [];
-            COLORES.forEach((color) => {
+            COLORES.forEach(color => {
               for (let i = 0; i < 2; i++) {
-                const peso = Math.floor(Math.random() * 19) + 2;
-                bloques.push({ color, peso });
+                bloques.push({ color, peso: Math.floor(Math.random() * 19) + 2 });
                 bloquesTotales++;
               }
             });
@@ -116,22 +201,9 @@ wss.on("connection", (ws) => {
           }
 
           jugadores.push(ws);
+          broadcast({ type: "ENTRADA", totalJugadores: jugadores.length });
 
-          broadcast({
-            type: "MENSAJE",
-            contenido: `${msg.jugador} se unió al juego.`,
-          });
-
-          broadcast({
-            type: "ENTRADA",
-            totalJugadores: jugadores.length,
-          });
-
-          if (jugadores.length >= 2 && Object.keys(equiposPorJugador).length === 0) {
-            emparejarJugadores();
-          }
-
-          enviarTurno();
+          actualizarEquiposYTemporizador();
         }
       }
 
@@ -142,18 +214,13 @@ wss.on("connection", (ws) => {
 
           sesion.jugadas.push({ ...msg });
           if (msg.lado === "izquierdo") sesion.pesoIzquierdo += msg.peso;
-          else if (msg.lado === "derecho") sesion.pesoDerecho += msg.peso;
+          else sesion.pesoDerecho += msg.peso;
 
           ws.send(JSON.stringify({
             type: "ACTUALIZAR_BALANZA",
             izquierdo: sesion.pesoIzquierdo,
             derecho: sesion.pesoDerecho,
             jugador: msg.jugador,
-          }));
-
-          ws.send(JSON.stringify({
-            type: "MENSAJE",
-            contenido: `${msg.jugador} colocó ${msg.peso}g en lado ${msg.lado}`,
           }));
 
           if (sesion.jugadas.length >= 10) {
@@ -167,15 +234,10 @@ wss.on("connection", (ws) => {
               },
               contenido: sesion.jugadas,
               sobrevivientes: [ws.nombre],
-              bloquesPorJugador: {
-                [ws.nombre]: sesion.bloques,
-              },
+              bloquesPorJugador: { [ws.nombre]: sesion.bloques },
             };
 
-            ws.send(JSON.stringify({
-              type: "RESUMEN",
-              ...resumen,
-            }));
+            ws.send(JSON.stringify({ type: "RESUMEN", ...resumen }));
           } else {
             ws.send(JSON.stringify({
               type: "TURNO",
@@ -184,15 +246,13 @@ wss.on("connection", (ws) => {
             }));
           }
         } else {
-          clearTimeout(turnoTimeout);
-          const jugadorActual = jugadores[turnoActual];
-          if (!jugadorActual) return;
+          if (!jugadoresListos) return;
 
           const jugada = new Jugada({
             jugador: msg.jugador,
             turno: totalJugadas + 1,
             peso: msg.peso,
-            equipo: equiposPorJugador[msg.jugador] || 0,
+            equipo: equiposPorJugador[msg.jugador],
             eliminado: false,
             color: msg.color,
           });
@@ -208,19 +268,19 @@ wss.on("connection", (ws) => {
             jugador: msg.jugador,
           });
 
-          broadcast({
-            type: "MENSAJE",
-            contenido: `${msg.jugador} colocó ${msg.peso}g en el lado ${msg.lado}`,
-          });
-
           totalJugadas++;
-
           if (totalJugadas >= bloquesTotales) {
             enviarResumenFinal();
           } else {
             avanzarTurno();
           }
         }
+      }
+
+      if (msg.type === "ADIVINANZA") {
+        const adivinanza = new Adivinanza(msg);
+        await adivinanza.save();
+        ws.send(JSON.stringify({ type: "ADIVINANZA_RESULTADO", resultado: "ok" }));
       }
     } catch (err) {
       console.error("❌ Error:", err.message);
@@ -229,99 +289,20 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     console.log(`🔴 Jugador desconectado: ${ws.nombre}`);
-    jugadores = jugadores.filter((j) => j !== ws);
+    jugadores = jugadores.filter(j => j !== ws);
     if (turnoActual >= jugadores.length) turnoActual = 0;
-    enviarTurno();
+
+    actualizarEquiposYTemporizador();
+
+    if (jugadores.length === 0) {
+      jugadoresListos = false;
+      tiempoRestante = null;
+      equiposPorJugador = {};
+      clearInterval(temporizadorInicio);
+      temporizadorInicio = null;
+    }
   });
 });
-
-function avanzarTurno() {
-  if (jugadores.length === 0) return;
-
-  let intentos = 0;
-  do {
-    turnoActual = (turnoActual + 1) % jugadores.length;
-    intentos++;
-  } while (jugadores[turnoActual]?.eliminado && intentos < jugadores.length);
-
-  enviarTurno();
-}
-
-function enviarTurno() {
-  clearTimeout(turnoTimeout);
-
-  if (!jugadores.length || turnoActual >= jugadores.length) {
-    console.warn("⚠️ No hay jugadores activos para el turno.");
-    return;
-  }
-
-  const jugadorActual = jugadores[turnoActual];
-  if (!jugadorActual) return;
-
-  const nombreActual = jugadorActual.nombre || `Jugador ${turnoActual + 1}`;
-
-  jugadores.forEach((j, i) => {
-    if (j.readyState === WebSocket.OPEN) {
-      try {
-        const equipo = equiposPorJugador[j.nombre] || null;
-        const compañeros = Object.entries(equiposPorJugador)
-          .filter(([nombre, eq]) => eq === equipo && nombre !== j.nombre)
-          .map(([nombre]) => nombre);
-
-        j.send(JSON.stringify({
-          type: "TURNO",
-          tuTurno: i === turnoActual && !j.eliminado,
-          jugadorEnTurno: nombreActual,
-          equipo,
-          compañeros,
-        }));
-      } catch (err) {
-        console.error("❌ Error al enviar turno:", err.message);
-      }
-    }
-  });
-
-  turnoTimeout = setTimeout(() => {
-    const jugadorTimeout = jugadores[turnoActual];
-    if (!jugadorTimeout) {
-      console.warn("⚠️ Jugador ya no existe en turnoActual:", turnoActual);
-      avanzarTurno();
-      return;
-    }
-
-    if (!jugadorTimeout.eliminado) {
-      jugadorTimeout.eliminado = true;
-      try {
-        jugadorTimeout.send(JSON.stringify({
-          type: "ELIMINADO",
-          mensaje: "Has sido eliminado por inactividad (60s sin mover bloque).",
-        }));
-      } catch (err) {
-        console.error("❌ Error al notificar eliminación:", err.message);
-      }
-
-      broadcast({
-        type: "MENSAJE",
-        contenido: `${jugadorTimeout.nombre} fue eliminado por inactividad.`,
-      });
-    }
-
-    avanzarTurno();
-  }, 60000);
-}
-
-function broadcast(data) {
-  const mensaje = typeof data === "string" ? data : JSON.stringify(data);
-  jugadores.forEach((j) => {
-    if (j.readyState === WebSocket.OPEN) {
-      try {
-        j.send(mensaje);
-      } catch (err) {
-        console.error("❌ Error al enviar broadcast:", err.message);
-      }
-    }
-  });
-}
 
 async function enviarResumenFinal() {
   const jugadas = await Jugada.find().sort({ turno: 1 });
@@ -337,6 +318,13 @@ async function enviarResumenFinal() {
     .filter((j) => !j.eliminado)
     .map((j) => j.nombre || "Jugador");
 
+  const ladoGanador =
+    pesoIzquierdo === pesoDerecho
+      ? "Empate"
+      : pesoIzquierdo < pesoDerecho
+      ? "Izquierdo"
+      : "Derecho";
+
   broadcast({
     type: "RESUMEN",
     contenido: resumen,
@@ -345,12 +333,7 @@ async function enviarResumenFinal() {
       derecho: pesoDerecho,
     },
     sobrevivientes,
-    ganador:
-      pesoIzquierdo === pesoDerecho
-        ? "Empate"
-        : pesoIzquierdo < pesoDerecho
-        ? "Izquierdo"
-        : "Derecho",
+    ganador: ladoGanador,
     bloquesPorJugador,
   });
 }

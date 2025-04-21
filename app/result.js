@@ -6,9 +6,15 @@ import {
   ScrollView,
   StyleSheet,
   TouchableOpacity,
-  Alert,
 } from "react-native";
-import { getSocket } from "../sockets/connection";
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  FadeInUp,
+  ZoomIn,
+  SlideInLeft,
+  SlideInRight,
+} from "react-native-reanimated";
 
 export default function ResultScreen() {
   const { resumen, nombre } = useLocalSearchParams();
@@ -19,6 +25,7 @@ export default function ResultScreen() {
   const [resultadoAciertos, setResultadoAciertos] = useState(null);
   const [tituloFinal, setTituloFinal] = useState("");
   const [fraseFinal, setFraseFinal] = useState("");
+  const [puntajeTotal, setPuntajeTotal] = useState(0);
 
   useEffect(() => {
     try {
@@ -32,22 +39,40 @@ export default function ResultScreen() {
   const esSobreviviente = resumenData?.sobrevivientes.includes(nombre);
   const misBloques = resumenData?.bloquesPorJugador[nombre] || [];
 
-  const evaluarDesempeño = (aciertos) => {
-    if (aciertos === 10) {
-      setTituloFinal("🥇 Maestro del Equilibrio");
-      setFraseFinal("Tu precisión fue perfecta. ¡Eres leyenda!");
-    } else if (aciertos >= 7) {
-      setTituloFinal("🥈 Gran Adivinador");
-      setFraseFinal("Tu instinto es casi infalible.");
-    } else if (aciertos >= 4) {
-      setTituloFinal("🥉 Sobreviviente Audaz");
-      setFraseFinal("No fue perfecto, pero sobreviviste. ¡Nada mal!");
+  const evaluarDesempeño = (aciertos, detalle) => {
+    let puntos = 0;
+  
+    detalle.forEach(({ intento, pesoReal }) => {
+      if (intento === pesoReal) puntos += 2;
+      else if (Math.abs(intento - pesoReal) === 1) puntos += 1;
+    });
+  
+    if (esSobreviviente) puntos += 2;
+  
+    if (resumenData?.totales.izquierdo === resumenData?.totales.derecho) {
+      puntos += 3;
+    }
+  
+    setPuntajeTotal(puntos);
+  
+    if (puntos >= 15) {
+      setTituloFinal("🧠 Genio del equilibrio");
+      setFraseFinal("Has dominado la precisión y el balance. ¡Asombroso!");
+    } else if (puntos >= 10) {
+      setTituloFinal("🥈 Gran Estratega");
+      setFraseFinal("Buen ojo y gran sentido del peso.");
+    } else if (puntos >= 6) {
+      setTituloFinal("⚖️ Jugador Persistente");
+      setFraseFinal("Sobreviviste con esfuerzo. No está nada mal.");
+    } else if (puntos >= 1) {
+      setTituloFinal("😅 Aprendiz");
+      setFraseFinal("Necesitás mejorar tus sentidos...");
     } else {
-        setTituloFinal("💀 Sin esperanza");
-        setFraseFinal("No adivinaste ni uno. Te recomiendo abrir los ojos al jugar.");
-      }
-      
+      setTituloFinal("💀 Sin puntería");
+      setFraseFinal("No adivinaste ni uno. ¿Estás jugando con los ojos cerrados?");
+    }
   };
+  
 
   const enviarAdivinanza = async () => {
     let aciertos = 0;
@@ -74,21 +99,34 @@ export default function ResultScreen() {
 
       if (response.ok) {
         setResultadoAciertos(aciertos);
-        evaluarDesempeño(aciertos);
-        Alert.alert("✅ Adivinanza enviada", `Adivinaste ${aciertos} de ${misBloques.length} bloques`);
-      } else {
-        const data = await response.json();
-        Alert.alert("❌ Error", data?.error || "No se pudo guardar la adivinanza");
+        evaluarDesempeño(aciertos, detalle);
       }
     } catch (error) {
       console.error("❌ Error al registrar adivinanza:", error.message);
-      Alert.alert("❌ Error de red", "No se pudo enviar la adivinanza.");
     }
   };
 
   const volverAlInicio = () => {
+    try {
+      const socket = getSocket();
+      if (socket && socket.readyState === 1) {
+        socket.close(); // 🔒 cerrar para crear nueva conexión limpia
+      }
+    } catch (e) {
+      console.log("Error al cerrar socket:", e.message);
+    }
+  
+    setResumenData(null);
+    setResultadoAciertos(null);
+    setTituloFinal("");
+    setFraseFinal("");
+    setPuntajeTotal(0);
+    setAdivinanzas({});
+  
     router.replace("/");
   };
+  
+  
 
   if (!resumenData) {
     return (
@@ -100,20 +138,24 @@ export default function ResultScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.titulo}>🏁 Juego Finalizado</Text>
-      <Text style={styles.linea}>⚖️ Izquierdo: {resumenData.totales.izquierdo}g</Text>
-      <Text style={styles.linea}>⚖️ Derecho: {resumenData.totales.derecho}g</Text>
-      <Text style={styles.linea}>🏆 Ganador: {resumenData.ganador}</Text>
-      <Text style={styles.linea}>
-        👤 Sobrevivientes: {resumenData.sobrevivientes.join(", ") || "Ninguno"}
-      </Text>
+      <Animated.Text entering={FadeIn} style={styles.titulo}>🏁 Juego Finalizado</Animated.Text>
 
-      <Text style={styles.subtitulo}>📋 Jugadas:</Text>
-      {resumenData.contenido.map((j, i) => (
-        <Text key={i} style={styles.turno}>
-          • Turno {j.turno}: {j.jugador} colocó {j.peso}g
+      <Animated.View entering={SlideInLeft.duration(400)} style={styles.datoBox}>
+        <Text style={styles.linea}>⚖️ Izquierdo: {resumenData.totales.izquierdo}g</Text>
+        <Text style={styles.linea}>⚖️ Derecho: {resumenData.totales.derecho}g</Text>
+        <Text style={styles.linea}>
+          👤 Sobrevivientes: {resumenData.sobrevivientes.join(", ") || "Ninguno"}
         </Text>
-      ))}
+      </Animated.View>
+
+      <Animated.Text entering={FadeInUp.delay(300)} style={styles.subtitulo}>📋 Jugadas:</Animated.Text>
+      <Animated.View entering={SlideInRight.delay(400)} style={{ marginBottom: 20 }}>
+        {resumenData.contenido.map((j, i) => (
+          <Text key={i} style={styles.turno}>
+            • Turno {j.turno}: {j.jugador} colocó {j.peso}g
+          </Text>
+        ))}
+      </Animated.View>
 
       {esSobreviviente && resultadoAciertos === null && (
         <View style={styles.adivinanzaContainer}>
@@ -154,13 +196,23 @@ export default function ResultScreen() {
       )}
 
       {resultadoAciertos !== null && (
-        <View style={styles.finalBox}>
-          <Text style={styles.medalla}>{tituloFinal}</Text>
-          <Text style={styles.aciertos}>
+        <Animated.View entering={ZoomIn.duration(500)} style={styles.finalBox}>
+          <Animated.Text entering={FadeIn.duration(800)} style={styles.medalla}>
+            {tituloFinal}
+          </Animated.Text>
+
+          <Animated.Text entering={FadeInDown.delay(300)} style={styles.aciertos}>
             🎯 Acertaste {resultadoAciertos} de {misBloques.length} bloques
-          </Text>
-          <Text style={styles.frase}>{fraseFinal}</Text>
-        </View>
+          </Animated.Text>
+
+          <Animated.Text entering={FadeInDown.delay(500)} style={styles.puntaje}>
+            🧠 Puntaje total: {puntajeTotal} puntos
+          </Animated.Text>
+
+          <Animated.Text entering={FadeInDown.delay(700)} style={styles.frase}>
+            {fraseFinal}
+          </Animated.Text>
+        </Animated.View>
       )}
 
       <TouchableOpacity
@@ -193,12 +245,19 @@ const styles = StyleSheet.create({
   },
   linea: {
     fontSize: 16,
-    marginBottom: 5,
+    marginBottom: 4,
+  },
+  datoBox: {
+    backgroundColor: "#fff",
+    padding: 15,
+    borderRadius: 10,
+    elevation: 2,
+    marginBottom: 20,
   },
   subtitulo: {
     fontSize: 18,
     fontWeight: "bold",
-    marginTop: 30,
+    marginTop: 20,
     marginBottom: 10,
   },
   turno: {
@@ -260,6 +319,12 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "bold",
     color: "#27ae60",
+    marginBottom: 4,
+  },
+  puntaje: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#2980b9",
     marginBottom: 6,
   },
   frase: {

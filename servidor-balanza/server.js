@@ -263,10 +263,17 @@ function enviarTurno() {
   jugadores.forEach((j, i) => {
     if (j.readyState === WebSocket.OPEN) {
       try {
+        const equipo = equiposPorJugador[j.nombre] || null;
+        const compañeros = Object.entries(equiposPorJugador)
+          .filter(([nombre, eq]) => eq === equipo && nombre !== j.nombre)
+          .map(([nombre]) => nombre);
+
         j.send(JSON.stringify({
           type: "TURNO",
           tuTurno: i === turnoActual && !j.eliminado,
           jugadorEnTurno: nombreActual,
+          equipo,
+          compañeros,
         }));
       } catch (err) {
         console.error("❌ Error al enviar turno:", err.message);

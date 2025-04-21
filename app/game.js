@@ -30,7 +30,10 @@ export default function GameScreen() {
   const [contador, setContador] = useState(60);
   const [jugadoresConectados, setJugadoresConectados] = useState(1);
   const [esperando, setEsperando] = useState(modo === "multijugador");
+  const [equipo, setEquipo] = useState(null);
+  const [companeros, setCompaneros] = useState([]);
 
+  const socket = useRef(getSocket());
   const [dropAreas, setDropAreas] = useState({ izquierdo: null, derecho: null });
   const intervaloRef = useRef(null);
 
@@ -51,90 +54,87 @@ export default function GameScreen() {
   }, []);
 
   useEffect(() => {
-    const socket = getSocket();
     const mensaje = { type: "ENTRADA", jugador: nombre, modo };
 
-    const conectar = () => {
-      if (socket.readyState === 1) {
-        socket.send(JSON.stringify(mensaje));
-      } else {
-        socket.onopen = () => {
-          socket.send(JSON.stringify(mensaje));
-        };
-      }
-
-      socket.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === "TURNO") {
-            setMiTurno(data.tuTurno);
-            setJugadorEnTurno(data.jugadorEnTurno);
-            if (data.tuTurno) {
-              setContador(60);
-              clearInterval(intervaloRef.current);
-              intervaloRef.current = setInterval(() => {
-                setContador((prev) => {
-                  if (prev <= 1) {
-                    clearInterval(intervaloRef.current);
-                    return 0;
-                  }
-                  return prev - 1;
-                });
-              }, 1000);
-            }
-          }
-
-          if (data.type === "ACTUALIZAR_BALANZA") {
-            setPesoIzq(data.izquierdo);
-            setPesoDer(data.derecho);
-          }
-
-          if (data.type === "MENSAJE") {
-            setMensajes((prev) => [...prev, data.contenido]);
-          }
-
-          if (data.type === "ELIMINADO") {
-            setEliminado(true);
-            setMiTurno(false);
-            Alert.alert("🚫 Eliminado", data.mensaje);
-          }
-
-          if (data.type === "RESUMEN") {
-            clearInterval(intervaloRef.current);
-            router.replace({
-              pathname: "/result",
-              params: {
-                resumen: encodeURIComponent(JSON.stringify(data)),
-                nombre,
-              },
-            });
-          }
-
-          if (data.type === "ENTRADA" && data.totalJugadores !== undefined) {
-            setJugadoresConectados(data.totalJugadores);
-            if (data.totalJugadores >= 3) {
-              setEsperando(false);
-            }
-          }
-        } catch (err) {
-          console.error("❌ WS Error:", err.message);
-        }
+    if (socket.current.readyState === 1) {
+      socket.current.send(JSON.stringify(mensaje));
+    } else {
+      socket.current.onopen = () => {
+        socket.current.send(JSON.stringify(mensaje));
       };
-    };
+    }
 
-    conectar();
+    socket.current.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+
+        if (data.type === "TURNO") {
+          setMiTurno(data.tuTurno);
+          setJugadorEnTurno(data.jugadorEnTurno);
+          if (modo === "multijugador") {
+            setEquipo(data.equipo || null);
+            setCompaneros(data.compañeros || []);
+          }
+
+          if (data.tuTurno) {
+            setContador(60);
+            clearInterval(intervaloRef.current);
+            intervaloRef.current = setInterval(() => {
+              setContador((prev) => {
+                if (prev <= 1) {
+                  clearInterval(intervaloRef.current);
+                  return 0;
+                }
+                return prev - 1;
+              });
+            }, 1000);
+          }
+        }
+
+        if (data.type === "ACTUALIZAR_BALANZA") {
+          setPesoIzq(data.izquierdo);
+          setPesoDer(data.derecho);
+        }
+
+        if (data.type === "MENSAJE") {
+          setMensajes((prev) => [...prev, data.contenido]);
+        }
+
+        if (data.type === "ELIMINADO") {
+          setEliminado(true);
+          setMiTurno(false);
+          Alert.alert("🚫 Eliminado", data.mensaje);
+        }
+
+        if (data.type === "RESUMEN") {
+          clearInterval(intervaloRef.current);
+          router.replace({
+            pathname: "/result",
+            params: {
+              resumen: encodeURIComponent(JSON.stringify(data)),
+              nombre,
+            },
+          });
+        }
+
+        if (data.type === "ENTRADA" && data.totalJugadores !== undefined) {
+          setJugadoresConectados(data.totalJugadores);
+          if (data.totalJugadores >= 3) {
+            setEsperando(false);
+          }
+        }
+      } catch (err) {
+        console.error("❌ WS Error:", err.message);
+      }
+    };
 
     return () => {
       clearInterval(intervaloRef.current);
-      if (modo === "multijugador" && socket.readyState === 1) {
-        socket.close();
-      }
     };
   }, []);
 
   const enviarJugada = (bloque, lado) => {
-    const socket = getSocket();
-    socket.send(JSON.stringify({
+    socket.current.send(JSON.stringify({
       type: "JUGADA",
       jugador: nombre,
       peso: bloque.peso,
@@ -168,13 +168,16 @@ export default function GameScreen() {
 
     const panResponder = PanResponder.create({
       onStartShouldSetPanResponder: () => miTurno && !eliminado,
-      onPanResponderGrant: () => bloque.pan.extractOffset(),
+      onPanResponderGrant: () => {
+        bloque.pan.extractOffset();
+      },
       onPanResponderMove: Animated.event(
         [null, { dx: bloque.pan.x, dy: bloque.pan.y }],
         { useNativeDriver: false }
       ),
       onPanResponderRelease: (_, gesture) => {
         bloque.pan.flattenOffset();
+
         const inIzq = isInDropArea(gesture, dropAreas.izquierdo);
         const inDer = isInDropArea(gesture, dropAreas.derecho);
 
@@ -198,7 +201,12 @@ export default function GameScreen() {
         style={[
           styles.bloque,
           { backgroundColor: bloque.color },
-          { transform: [{ translateX: bloque.pan.x }, { translateY: bloque.pan.y }] },
+          {
+            transform: [
+              { translateX: bloque.pan.x },
+              { translateY: bloque.pan.y },
+            ],
+          },
         ]}
       />
     );
@@ -220,6 +228,11 @@ export default function GameScreen() {
   return (
     <View style={{ flex: 1, padding: 20 }}>
       <Text style={styles.titulo}>Jugador: {nombre}</Text>
+      {modo === "multijugador" && equipo && (
+        <Text style={styles.subtitulo}>
+          Equipo #{equipo} — Compañero: {companeros.join(", ") || "ninguno"}
+        </Text>
+      )}
       <Text style={styles.subtitulo}>Turno de: {jugadorEnTurno || "..."}</Text>
       <Text style={{ color: "red", marginBottom: 10 }}>
         {miTurno ? `⏱️ Tiempo: ${contador}s` : "⏳ Esperando turno..."}

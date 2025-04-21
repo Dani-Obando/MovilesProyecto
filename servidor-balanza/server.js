@@ -30,6 +30,23 @@ let turnoTimeout = null;
 
 const sesionesIndividuales = {};
 const COLORES = ["red", "blue", "green", "orange", "purple"];
+let equiposPorJugador = {};
+
+function emparejarJugadores() {
+  const nombres = jugadores.map((j) => j.nombre);
+  const barajados = nombres.sort(() => Math.random() - 0.5);
+  equiposPorJugador = {};
+
+  for (let i = 0; i < barajados.length; i += 2) {
+    const equipoId = Math.floor(i / 2) + 1;
+    equiposPorJugador[barajados[i]] = equipoId;
+    if (barajados[i + 1]) {
+      equiposPorJugador[barajados[i + 1]] = equipoId;
+    }
+  }
+
+  console.log("🔀 Equipos generados:", equiposPorJugador);
+}
 
 wss.on("connection", (ws) => {
   ws.id = Math.random().toString(36).substring(2);
@@ -44,7 +61,6 @@ wss.on("connection", (ws) => {
         ws.modo = msg.modo || "multijugador";
 
         if (ws.modo === "individual") {
-          // Reiniciar sesión si terminó anteriormente
           if (!sesionesIndividuales[ws.nombre] || sesionesIndividuales[ws.nombre].terminado) {
             const bloques = [];
             COLORES.forEach((color) => {
@@ -62,33 +78,27 @@ wss.on("connection", (ws) => {
             };
           }
 
-          ws.send(
-            JSON.stringify({
-              type: "TURNO",
-              tuTurno: true,
-              jugadorEnTurno: ws.nombre,
-            })
-          );
+          ws.send(JSON.stringify({
+            type: "TURNO",
+            tuTurno: true,
+            jugadorEnTurno: ws.nombre,
+          }));
         } else {
           const yaExiste = jugadores.find((j) => j.nombre === msg.jugador);
           if (yaExiste) {
-            ws.send(
-              JSON.stringify({
-                type: "ERROR",
-                mensaje: "Este nombre de jugador ya está en uso en esta partida.",
-              })
-            );
+            ws.send(JSON.stringify({
+              type: "ERROR",
+              mensaje: "Este nombre de jugador ya está en uso en esta partida.",
+            }));
             ws.close();
             return;
           }
 
-          if (jugadores.length >= 9) {
-            ws.send(
-              JSON.stringify({
-                type: "ERROR",
-                mensaje: "El número máximo de jugadores (10) ya ha sido alcanzado.",
-              })
-            );
+          if (jugadores.length >= 10) {
+            ws.send(JSON.stringify({
+              type: "ERROR",
+              mensaje: "El número máximo de jugadores (10) ya ha sido alcanzado.",
+            }));
             ws.close();
             return;
           }
@@ -117,6 +127,10 @@ wss.on("connection", (ws) => {
             totalJugadores: jugadores.length,
           });
 
+          if (jugadores.length >= 2 && Object.keys(equiposPorJugador).length === 0) {
+            emparejarJugadores();
+          }
+
           enviarTurno();
         }
       }
@@ -130,21 +144,17 @@ wss.on("connection", (ws) => {
           if (msg.lado === "izquierdo") sesion.pesoIzquierdo += msg.peso;
           else if (msg.lado === "derecho") sesion.pesoDerecho += msg.peso;
 
-          ws.send(
-            JSON.stringify({
-              type: "ACTUALIZAR_BALANZA",
-              izquierdo: sesion.pesoIzquierdo,
-              derecho: sesion.pesoDerecho,
-              jugador: msg.jugador,
-            })
-          );
+          ws.send(JSON.stringify({
+            type: "ACTUALIZAR_BALANZA",
+            izquierdo: sesion.pesoIzquierdo,
+            derecho: sesion.pesoDerecho,
+            jugador: msg.jugador,
+          }));
 
-          ws.send(
-            JSON.stringify({
-              type: "MENSAJE",
-              contenido: `${msg.jugador} colocó ${msg.peso}g en lado ${msg.lado}`,
-            })
-          );
+          ws.send(JSON.stringify({
+            type: "MENSAJE",
+            contenido: `${msg.jugador} colocó ${msg.peso}g en lado ${msg.lado}`,
+          }));
 
           if (sesion.jugadas.length >= 10) {
             sesion.terminado = true;
@@ -162,20 +172,16 @@ wss.on("connection", (ws) => {
               },
             };
 
-            ws.send(
-              JSON.stringify({
-                type: "RESUMEN",
-                ...resumen,
-              })
-            );
+            ws.send(JSON.stringify({
+              type: "RESUMEN",
+              ...resumen,
+            }));
           } else {
-            ws.send(
-              JSON.stringify({
-                type: "TURNO",
-                tuTurno: true,
-                jugadorEnTurno: ws.nombre,
-              })
-            );
+            ws.send(JSON.stringify({
+              type: "TURNO",
+              tuTurno: true,
+              jugadorEnTurno: ws.nombre,
+            }));
           }
         } else {
           clearTimeout(turnoTimeout);
@@ -186,7 +192,7 @@ wss.on("connection", (ws) => {
             jugador: msg.jugador,
             turno: totalJugadas + 1,
             peso: msg.peso,
-            equipo: 0,
+            equipo: equiposPorJugador[msg.jugador] || 0,
             eliminado: false,
             color: msg.color,
           });
@@ -216,33 +222,13 @@ wss.on("connection", (ws) => {
           }
         }
       }
-
-      if (msg.type === "ADIVINANZA") {
-        try {
-          const adivinanza = new Adivinanza(msg);
-          await adivinanza.save();
-          ws.send(
-            JSON.stringify({
-              type: "ADIVINANZA_RESULTADO",
-              resultado: "Adivinanza registrada con éxito",
-            })
-          );
-        } catch (err) {
-          ws.send(
-            JSON.stringify({
-              type: "ERROR",
-              mensaje: "Error al guardar la adivinanza.",
-            })
-          );
-        }
-      }
     } catch (err) {
       console.error("❌ Error:", err.message);
     }
   });
 
   ws.on("close", () => {
-    console.log(`🔴 Jugador desconectado: ${ws.nombre || ws.id}`);
+    console.log(`🔴 Jugador desconectado: ${ws.nombre}`);
     jugadores = jugadores.filter((j) => j !== ws);
     if (turnoActual >= jugadores.length) turnoActual = 0;
     enviarTurno();
@@ -277,13 +263,11 @@ function enviarTurno() {
   jugadores.forEach((j, i) => {
     if (j.readyState === WebSocket.OPEN) {
       try {
-        j.send(
-          JSON.stringify({
-            type: "TURNO",
-            tuTurno: i === turnoActual && !j.eliminado,
-            jugadorEnTurno: nombreActual,
-          })
-        );
+        j.send(JSON.stringify({
+          type: "TURNO",
+          tuTurno: i === turnoActual && !j.eliminado,
+          jugadorEnTurno: nombreActual,
+        }));
       } catch (err) {
         console.error("❌ Error al enviar turno:", err.message);
       }
@@ -293,6 +277,7 @@ function enviarTurno() {
   turnoTimeout = setTimeout(() => {
     const jugadorTimeout = jugadores[turnoActual];
     if (!jugadorTimeout) {
+      console.warn("⚠️ Jugador ya no existe en turnoActual:", turnoActual);
       avanzarTurno();
       return;
     }
@@ -300,12 +285,10 @@ function enviarTurno() {
     if (!jugadorTimeout.eliminado) {
       jugadorTimeout.eliminado = true;
       try {
-        jugadorTimeout.send(
-          JSON.stringify({
-            type: "ELIMINADO",
-            mensaje: "Has sido eliminado por inactividad (60s sin mover bloque).",
-          })
-        );
+        jugadorTimeout.send(JSON.stringify({
+          type: "ELIMINADO",
+          mensaje: "Has sido eliminado por inactividad (60s sin mover bloque).",
+        }));
       } catch (err) {
         console.error("❌ Error al notificar eliminación:", err.message);
       }
@@ -347,13 +330,6 @@ async function enviarResumenFinal() {
     .filter((j) => !j.eliminado)
     .map((j) => j.nombre || "Jugador");
 
-  const ladoGanador =
-    pesoIzquierdo === pesoDerecho
-      ? "Empate"
-      : pesoIzquierdo < pesoDerecho
-      ? "Izquierdo"
-      : "Derecho";
-
   broadcast({
     type: "RESUMEN",
     contenido: resumen,
@@ -362,7 +338,12 @@ async function enviarResumenFinal() {
       derecho: pesoDerecho,
     },
     sobrevivientes,
-    ganador: ladoGanador,
+    ganador:
+      pesoIzquierdo === pesoDerecho
+        ? "Empate"
+        : pesoIzquierdo < pesoDerecho
+        ? "Izquierdo"
+        : "Derecho",
     bloquesPorJugador,
   });
 }
